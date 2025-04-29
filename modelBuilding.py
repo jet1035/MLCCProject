@@ -308,85 +308,203 @@ data['hvi'] = data['hvi'] - 1
 #%%Train test split
 
 #get X and y first
-y = data['hvi']
-X = data.drop(columns = ['hvi','zipcode'])
+y = data['hvi'].to_numpy()
+X = data.drop(columns = ['hvi','zipcode']).to_numpy()
+
 
 #Get test data first
 #stratify to keep proportion of class labels
-X_dev, X_test, y_dev, y_test = train_test_split(X, y, test_size=0.1, stratify=y, random_state=seed)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1, stratify=y, random_state=seed)
 
+#further split to get validation set 
+X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.1, stratify = y_train, random_state=seed)
 
 
 #%% Fit standard scaler
 
+#get indices of columns
+columns=list(data.columns)
+columns.pop(3)
+
+#Columns to scale
+scaleCols = [1,2,3,4,5,6,7,9,10,11,12,13,14]
+
+#Fit scaler 
+scaler = StandardScaler().fit(X_train[:, scaleCols])
+
+#Copy datasets
+X_train_scaled = np.copy(X_train)
+X_val_scaled = np.copy(X_val)
+X_test_scaled = np.copy(X_test)
+
+#transform
+X_train[:, scaleCols] = scaler.transform(X_train[:, scaleCols])
+X_val[:, scaleCols] = scaler.transform(X_val[:, scaleCols])
+X_test[:, scaleCols] = scaler.transform(X_test[:, scaleCols])
+
+#%%boost
+#set hyper parameters
+params = {
+            'objective':'binary:logistic',
+            'max_depth': 2, #learning rate of 2 gets 0.79 average auc, 4 gets 0.75 which do we do????
+            'alpha': 10,
+            'learning_rate': 0.1,
+            'n_estimators':10
+        }         
+             
+#instantiate the classifier 
+boost = XGBClassifier(**params).fit(X_train,y_train)
+
+#%get predictions
+boost_pred = boost.predict(X_val)
+boost_proba = boost.predict_proba(X_val)
 
 
-scaler = StandardScaler()
-X_dev_scaled = X_dev.copy()
-X_test_scaled = X_test.copy()
-
-
-#scale columns 
-scaleCols=[0,1,2,3,4,5,6,8,9,10,11,12,13]
-
-#col9???
-
-# Apply scaling only to selected columns
-X_dev_scaled.iloc[:, scaleCols] = scaler.fit_transform(X_dev_scaled.iloc[:, scaleCols].astype(float))
-X_test_scaled.iloc[:, scaleCols] = scaler.transform(X_test_scaled.iloc[:, scaleCols].astype(float))
-
-#%%
-#Boost model
-boost = XGBClassifier(
-    use_label_encoder=False,
-    eval_metric='logloss',
-    random_state=seed
-)
-
-#%%cross val
-from sklearn.model_selection import StratifiedKFold, cross_val_score
-cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
-
-scores = cross_val_score(boost, X_dev_scaled, y_dev, cv=cv, scoring='accuracy', n_jobs=-1)
-
-#%%
-print(f"Cross-validation accuracy scores: {scores}")
-print(f"Mean CV accuracy: {scores.mean():.4f}")
-
-
-
-
-
-
-#%%THIS IS ALL FROM BEFORE NOW ITS ALL TOTALLY BROKEN FROM MY CV ATTEMPT
-
-
-
-#scale columns 
-scaleCols=[1,2,3,4,5,6,7,9,10,11,12,13,14] 
-
-#WHAT DO WE DO WITH COLUMN 8???
-
-#Preprocessor for pipeline
-preprocessor = ColumnTransformer(
-    transformers=[
-        ('num', StandardScaler(), scaleCols)
-    ]
-)
-
-boost = Pipeline(steps=[
-    ('preprocessor', preprocessor),
-    ('classifier', XGBClassifier(use_label_encoder=False, eval_metric='logloss'))
-])
-
-boost.fit(X_train, y_train)
-
-# Predict
-y_pred = boost.predict(X_val)
-boostProba = boost.predict_proba(X_val)
-#%%metrics
+#%metrics
 boostAccuracy = boost.score(X=X_val, y=y_val)
-boostCM = confusion_matrix(y_val, y_pred)
-boostAUC = roc_auc_score(y_val, boostProba, multi_class='ovr')
+boostCM = confusion_matrix(y_val, boost_pred)
+boostAUC = roc_auc_score(y_val, boost_proba, multi_class='ovr')
+
+#% get metrics for each class
+n_classes = boost_proba.shape[1]
+
+#initialize list
+boost_class_aucs = []
+
+for i in range(n_classes):
+    # create binary labels for class i
+    binary_true = (y_val == i).astype(int)  # 1 if true class is i, else 0
+    
+    # predicted probability for class i
+    prob_i = boost_proba[:, i]
+    
+    # compute AUC for class i
+    auc_i = roc_auc_score(binary_true, prob_i)
+    boost_class_aucs.append(auc_i)
+
+for i, auc in enumerate(boost_class_aucs):
+    print(f"{i}: {auc:.3f}")
+    
+#%%Neural network
+import torch
+from torch import nn, optim
+from IPython import display
+
+#get tensors for mlp
+X_train_pth = torch.as_tensor(X_train, dtype=torch.float)
+X_val_pth = torch.as_tensor(X_val, dtype=torch.float)
+X_test_pth = torch.as_tensor(X_test, dtype=torch.float)
 
 
+y_train_pth = torch.as_tensor(y_train).long()
+y_val_pth = torch.as_tensor(y_val).long()
+y_test_pth = torch.as_tensor(y_test).long()
+
+
+#remove two rows with nans
+mask = ~torch.isnan(X_train_pth).any(dim=1)
+X_train_pth = X_train_pth[mask]
+y_train_pth = y_train_pth[mask]
+
+#%%
+D = 15
+C = 5
+H = 20
+
+mlp = nn.Sequential(
+    nn.Linear(D,H),
+    nn.ReLU(),
+    nn.Linear(H,C)
+    )
+
+#hyper parameters
+learning_rate = 0.1
+lambda_l2 = 1e-4
+
+#%%Train MLP
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.SGD(mlp.parameters(), lr=learning_rate, weight_decay = lambda_l2)
+
+for t in range(1000):
+    #Forward Pass
+    mlpPred = mlp(X_train_pth) #1
+    
+    #Compute loss and accuracy
+    loss = criterion(mlpPred, y_train_pth)
+    score, predicted = torch.max(mlpPred,1)
+    acc = (y_train_pth == predicted).sum().item()/len(y_train) #2
+    
+    print("[EPOCH]: %i, [LOSS]: %.6f, [ACCURACY]: %.3f" % (t, loss.item(), acc))
+    display.clear_output(wait=True)
+    
+    #3 reset gradients
+    optimizer.zero_grad() 
+    
+    #4
+    loss.backward()
+    
+    #5
+    optimizer.step()
+    
+#%%
+out = mlp(X_val_pth)
+_, predicted = torch.max(out.data, 1)
+
+print('Accuracy of the network %.4f %%' % (100 * torch.sum(y_val_pth==predicted).double() / len(y_val_pth)))
+    
+
+#%%
+'''
+import torch.nn.functional as F
+
+mlp.eval()
+with torch.no_grad():
+    mlpPred=mlp(X_val_pth)
+    probs = F.softmax(mlpPred, dim=1)
+
+y_true=y_val_pth.cpu().numpy()
+y_score=probs.cpu().numpy()
+
+auc = roc_auc_score(y_val, y_score, multi_class='ovr')
+print("Final AUC: %.3f" % auc)
+'''
+
+#%%
+import torch.nn.functional as F
+
+
+# Compute probabilities as before
+mlp.eval()
+with torch.no_grad():
+    mlpPred = mlp(X_val_pth)
+    probs = F.softmax(mlpPred, dim=1)
+
+# Convert to numpy arrays for sklearn
+y_true = y_val_pth.cpu().numpy()  # True labels
+y_score = probs.cpu().numpy()     # Predicted probabilities
+
+# Get the number of classes
+n_classes = y_score.shape[1]
+
+# List to store AUCs
+class_aucs = []
+
+# Compute AUC for each class
+for i in range(n_classes):
+    # Create binary labels for class i (One-vs-Rest)
+    binary_true = (y_true == i).astype(int)
+    
+    # Predicted probability for class i
+    prob_i = y_score[:, i]
+    
+    # Compute AUC for class i
+    auc_i = roc_auc_score(binary_true, prob_i)
+    class_aucs.append(auc_i)
+
+# Print individual class AUCs
+for i, auc in enumerate(class_aucs):
+    print(f"Class {i}: AUC = {auc:.3f}")
+
+# Compute and print the overall AUC
+overall_auc = roc_auc_score(y_true, y_score, multi_class='ovr')
+print(f"Overall AUC: {overall_auc:.3f}")
